@@ -48,6 +48,9 @@ mod test_batch_error_events;
 mod test_parameter_governance;
 
 #[cfg(test)]
+mod test_cosig_replay;
+
+#[cfg(test)]
 mod test_two_person_control;
 
 #[cfg(test)]
@@ -5777,6 +5780,12 @@ impl ScoreGateScoreContract {
     /// Returns [`Error::ServiceSetFull`] when the set already contains
     /// `MAX_SERVICE_SIGNERS` members, [`Error::SignerAlreadyInSet`] when
     /// `signer` is already present.
+    ///
+    /// If the signer previously had a `SignerAccuracyRecord` in storage
+    /// (e.g. from a prior tenure that ended with removal or expiry), that
+    /// record is replaced with a fresh zero-baseline so that historical
+    /// penalties from the previous tenure do not permanently distort
+    /// accuracy rankings after reinstatement (issue #262).
     pub fn add_service_signer(
         env: Env,
         admin_signers: Vec<Address>,
@@ -5797,6 +5806,12 @@ impl ScoreGateScoreContract {
         set.push_back(signer.clone());
         storage::set_service_set(&env, &set);
         storage::set_signer_added_at(&env, &signer, env.ledger().timestamp());
+
+        // #262: Reset accuracy record on (re-)admission so that prior-tenure
+        // penalties do not carry over.  Any existing record is replaced with a
+        // clean slate; first-time signers receive the same initialisation.
+        storage::set_signer_accuracy(&env, &signer, &SignerAccuracyRecord { count: 0, mad_scaled: 0 });
+
         storage::set_signer_state_record(
             &env,
             &SignerStateRecord {
@@ -6220,7 +6235,7 @@ impl ScoreGateScoreContract {
     ///
     /// ```
     /// # use scoregate_score::{ScoreGateScoreContract, ScoreGateScoreContractClient};
-    /// # use soroban_sdk::{testutils::{Address as _, Ledger as _}, Env, Address};
+    /// # use soroban_sdk::{testutils::{Address as _, Ledger as _}, Env, Address, Vec};
     /// let env = Env::default();
     /// env.mock_all_auths();
     /// let contract_id = env.register_contract(None, ScoreGateScoreContract);
@@ -6232,7 +6247,7 @@ impl ScoreGateScoreContract {
     /// assert_eq!(client.get_last_service_activity(), 0);
     /// // The service proves liveness; the call is stamped with the ledger clock.
     /// env.ledger().with_mut(|l| l.timestamp += 12_345);
-    /// client.ping_heartbeat();
+    /// client.ping_heartbeat(&Vec::new(&env));
     /// assert_eq!(client.get_last_service_activity(), 12_345);
     /// ```
     pub fn get_last_service_activity(env: Env) -> u64 {
@@ -6345,18 +6360,30 @@ impl ScoreGateScoreContract {
     }
 
     /// Proves off-chain service liveness without submitting a score.
-    /// Callable only by the configured service account. Updates
-    /// `LastServiceActivityAt` and, if a silence alert was previously
+    ///
+    /// In **legacy single-service mode** (no service signer set configured),
+    /// this requires the single registered service account to authenticate.
+    ///
+    /// In **multisig service mode** (service signer set with threshold k > 1),
+    /// this requires at least `threshold` distinct, authorised service signers
+    /// to co-authenticate via `service_signers`. A single signer cannot clear
+    /// a silence alert on behalf of the quorum — fixing the issue where any
+    /// individual signer could touch the heartbeat while the collective quorum
+    /// remained non-functional (issue #263).
+    ///
+    /// Updates `LastServiceActivityAt` and, if a silence alert was previously
     /// emitted, clears it and emits `ServiceResumedEvent`.
     ///
     /// # Errors
     /// - [`Error::NotInitialized`] if the contract has no admin yet.
+    /// - [`Error::InsufficientSigners`] when multisig mode is active and fewer
+    ///   than `threshold` service signers are provided.
     ///
     /// # Examples
     ///
     /// ```
     /// # use scoregate_score::{ScoreGateScoreContract, ScoreGateScoreContractClient};
-    /// # use soroban_sdk::{testutils::{Address as _, Ledger as _}, Env, Address};
+    /// # use soroban_sdk::{testutils::{Address as _, Ledger as _}, Env, Address, Vec};
     /// let env = Env::default();
     /// env.mock_all_auths();
     /// let contract_id = env.register_contract(None, ScoreGateScoreContract);
@@ -6366,15 +6393,14 @@ impl ScoreGateScoreContract {
     /// client.initialize(&admin, &service);
     /// assert_eq!(client.get_last_service_activity(), 0);
     /// env.ledger().with_mut(|l| l.timestamp = 1_000);
-    /// client.ping_heartbeat();
+    /// client.ping_heartbeat(&Vec::new(&env));
     /// assert_eq!(client.get_last_service_activity(), 1_000);
     /// ```
-    pub fn ping_heartbeat(env: Env) -> Result<(), Error> {
+    pub fn ping_heartbeat(env: Env, service_signers: Vec<Address>) -> Result<(), Error> {
         if !storage::has_admin(&env) {
             return Err(Error::NotInitialized);
         }
-        let service = storage::get_service(&env);
-        service.require_auth();
+        Self::require_service_signers_auth(&env, &service_signers)?;
         Self::record_service_activity(&env);
         Ok(())
     }

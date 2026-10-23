@@ -202,6 +202,11 @@ pub const MAX_EXPIRING_ENTRIES_PER_CALL: u32 = 100;
 /// Maximum number of concurrently pending parameter-change proposals.
 pub const MAX_PENDING_PARAMETER_PROPOSALS: u32 = 10;
 
+/// Maximum number of pending proposals inspected per `prune_expired_parameter_proposals`
+/// call. Bounding this to a small constant keeps the per-transaction CPU budget
+/// predictable and prevents resource-exhaustion on the pending queue.
+pub const PRUNE_PROPOSALS_BATCH_SIZE: u32 = 5;
+
 /// Maximum number of parameter proposal IDs retained in the historical proposal index.
 pub const MAX_PARAMETER_PROPOSAL_HISTORY: u32 = 100;
 

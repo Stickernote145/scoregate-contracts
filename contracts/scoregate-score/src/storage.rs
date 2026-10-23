@@ -961,10 +961,21 @@ pub fn is_parameter_proposal_expired(proposal: &crate::types::ParameterProposal,
 }
 
 /// Marks expired pending proposals and removes them from the pending index.
+///
+/// To bound per-call resource consumption, at most
+/// `PRUNE_PROPOSALS_BATCH_SIZE` proposals are inspected per invocation.
+/// If the pending queue is longer than this limit the oldest entries are
+/// processed first; subsequent calls advance through the remainder.
+/// Callers that need a full drain (e.g. `cleanup_expired_parameter_proposals`)
+/// may invoke this function in a loop until no more work remains, but in
+/// normal operation — where `propose_parameter_change` calls this once per
+/// proposal — a single batch is sufficient.
 pub fn prune_expired_parameter_proposals(env: &Env) {
     let ids = get_pending_parameter_proposal_ids(env);
     let now = env.ledger().timestamp();
-    for i in 0..ids.len() {
+    let batch = crate::constants::PRUNE_PROPOSALS_BATCH_SIZE;
+    let limit = if ids.len() < batch { ids.len() } else { batch };
+    for i in 0..limit {
         let id = ids.get(i).unwrap();
         if let Some(record) = get_parameter_proposal_record(env, id) {
             if record.status == ParameterProposalStatus::Pending
@@ -978,20 +989,23 @@ pub fn prune_expired_parameter_proposals(env: &Env) {
 
 /// Deletes all expired proposals from storage that have been expired for at least 48 hours.
 /// Returns (count_deleted, oldest_proposal_kept_timestamp).
+///
+/// Iterates the bounded historical index (capped at `MAX_PARAMETER_PROPOSAL_HISTORY`)
+/// rather than the unbounded `1..next_id` range, keeping per-call work O(history cap).
 pub fn cleanup_expired_parameter_proposals(env: &Env) -> (u32, u64) {
+    // Drain a batch of the pending queue first.
     prune_expired_parameter_proposals(env);
     let now = env.ledger().timestamp();
     let ttl_buffer_secs = 48 * 3600;
     let mut count = 0;
     let mut oldest_kept = u64::MAX;
 
-    let next_id = env
-        .storage()
-        .instance()
-        .get::<DataKeyB, u64>(&DataKeyB::ParameterProposalNextId)
-        .unwrap_or(1);
-
-    for id in 1..next_id {
+    // Use the capped historical index instead of scanning 1..next_id so the
+    // loop length is bounded by MAX_PARAMETER_PROPOSAL_HISTORY, not by the
+    // total lifetime proposal count.
+    let index = get_parameter_proposal_index(env);
+    for i in 0..index.len() {
+        let id = index.get(i).unwrap();
         if let Some(record) = get_parameter_proposal_record(env, id) {
             if record.status == ParameterProposalStatus::Expired {
                 let expiry = record

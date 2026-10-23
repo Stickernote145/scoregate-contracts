@@ -71,7 +71,7 @@ fn service_silent_past_heartbeat_threshold_reports_dead() {
     let admin = Address::generate(&env);
     let service = Address::generate(&env);
     client.initialize(&admin, &service);
-    client.ping_heartbeat();
+    client.ping_heartbeat(&Vec::new(&env));
 
     // Advance past the documented/default heartbeat alert threshold with no
     // further service activity — the freshness SLI must flip to "not alive"

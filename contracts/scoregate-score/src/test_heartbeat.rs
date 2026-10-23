@@ -114,7 +114,7 @@ fn test_ping_heartbeat_updates_last_activity_without_a_score() {
     let wallet = Address::generate(&env);
     let pair = symbol_short!("XLM_USDC");
 
-    client.ping_heartbeat();
+    client.ping_heartbeat(&Vec::new(&env));
 
     assert_eq!(client.get_last_service_activity(), START_TS);
     // No score was ever submitted — the ping alone must not write one.
@@ -128,7 +128,7 @@ fn test_ping_heartbeat_requires_initialization() {
     let contract_id = env.register_contract(None, ScoreGateScoreContract);
     let client = ScoreGateScoreContractClient::new(&env, &contract_id);
 
-    let result = client.try_ping_heartbeat();
+    let result = client.try_ping_heartbeat(&Vec::new(&env));
     assert_eq!(result, Err(Ok(crate::Error::NotInitialized)));
 }
 
@@ -283,7 +283,7 @@ fn test_ping_heartbeat_resumes_after_silence() {
     let _ = client.try_get_score(&wallet, &pair);
     assert!(silence_alert_emitted(&env, client.address.clone()));
 
-    client.ping_heartbeat();
+    client.ping_heartbeat(&Vec::new(&env));
 
     let resumed = find_resumed_event(&env, client.address.clone()).unwrap();
     assert_eq!(resumed.last_active_at, START_TS);
