@@ -7692,7 +7692,10 @@ impl ScoreGateScoreContract {
 
         parameter_governance::validate_parameter_value(&env, &param_key, &new_value)?;
 
-        storage::prune_expired_parameter_proposals(&env);
+        storage::prune_expired_parameter_proposals_bounded(
+            &env,
+            constants::MAX_PENDING_PARAMETER_PROPOSALS,
+        );
 
         if storage::count_pending_parameter_proposals(&env)
             >= constants::MAX_PENDING_PARAMETER_PROPOSALS

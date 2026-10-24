@@ -453,3 +453,143 @@ fn test_parameter_proposal_index_bounded_by_max_history_cap() {
     let retained = client.get_parameter_proposal(&6u64);
     assert_eq!(retained.status, ParameterProposalStatus::Vetoed);
 }
+
+// ── prune_expired_parameter_proposals_bounded tests (issue #265) ─────────────
+
+/// With `max_prune = 0` the bounded prune is a no-op: all pending proposals
+/// remain pending even when they are past their expiry.
+#[test]
+fn test_prune_bounded_max_zero_is_noop() {
+    let (env, client, admin, _service) = setup();
+    let value = encode_u64(&env, MIN_COOLDOWN_SECS);
+
+    // Seed two pending proposals.
+    env.as_contract(&client.address, || {
+        storage::test_seed_pending_parameter_proposals(
+            &env,
+            2,
+            &admin,
+            &param_key_cooldown(),
+            &value,
+        );
+    });
+
+    // Advance time so both proposals are expired.
+    advance_to(&env, START_TS + DEFAULT_UPGRADE_DELAY_SECS * 2 + 1);
+
+    env.as_contract(&client.address, || {
+        let pruned = storage::prune_expired_parameter_proposals_bounded(&env, 0);
+        assert_eq!(pruned, 0);
+    });
+
+    // Proposals must still be pending.
+    assert_eq!(client.get_pending_param_prop_ids().len(), 2);
+    let r1 = client.get_parameter_proposal(&1u64);
+    assert_eq!(r1.status, ParameterProposalStatus::Pending);
+    let r2 = client.get_parameter_proposal(&2u64);
+    assert_eq!(r2.status, ParameterProposalStatus::Pending);
+}
+
+/// With `max_prune = 1` only the first expired proposal is pruned per call,
+/// leaving the rest pending (i.e. the cap limits work per invocation).
+#[test]
+fn test_prune_bounded_cap_limits_work_per_call() {
+    let (env, client, admin, _service) = setup();
+    let value = encode_u64(&env, MIN_COOLDOWN_SECS);
+
+    // Seed three pending proposals.
+    env.as_contract(&client.address, || {
+        storage::test_seed_pending_parameter_proposals(
+            &env,
+            3,
+            &admin,
+            &param_key_cooldown(),
+            &value,
+        );
+    });
+
+    // Advance time so all three proposals are expired.
+    advance_to(&env, START_TS + DEFAULT_UPGRADE_DELAY_SECS * 2 + 1);
+
+    env.as_contract(&client.address, || {
+        let pruned = storage::prune_expired_parameter_proposals_bounded(&env, 1);
+        assert_eq!(pruned, 1);
+    });
+
+    // Only proposal 1 should be marked Expired; 2 and 3 remain Pending.
+    let r1 = client.get_parameter_proposal(&1u64);
+    assert_eq!(r1.status, ParameterProposalStatus::Expired);
+
+    let pending = client.get_pending_param_prop_ids();
+    assert_eq!(pending.len(), 2);
+    assert_eq!(pending.get(0).unwrap(), 2u64);
+    assert_eq!(pending.get(1).unwrap(), 3u64);
+}
+
+/// With `max_prune >= len(pending)` all expired proposals are pruned in a
+/// single call — same behaviour as the original unbounded implementation
+/// for the realistic case where the pending queue fits within the cap.
+#[test]
+fn test_prune_bounded_prunes_all_when_cap_exceeds_pending_count() {
+    let (env, client, admin, _service) = setup();
+    let value = encode_u64(&env, MIN_COOLDOWN_SECS);
+
+    // Seed two pending proposals.
+    env.as_contract(&client.address, || {
+        storage::test_seed_pending_parameter_proposals(
+            &env,
+            2,
+            &admin,
+            &param_key_cooldown(),
+            &value,
+        );
+    });
+
+    // Advance time so both proposals are expired.
+    advance_to(&env, START_TS + DEFAULT_UPGRADE_DELAY_SECS * 2 + 1);
+
+    env.as_contract(&client.address, || {
+        // max_prune = 10 (MAX_PENDING_PARAMETER_PROPOSALS) — larger than pending count.
+        let pruned = storage::prune_expired_parameter_proposals_bounded(
+            &env,
+            MAX_PENDING_PARAMETER_PROPOSALS,
+        );
+        assert_eq!(pruned, 2);
+    });
+
+    // Pending queue must be empty.
+    assert!(client.get_pending_param_prop_ids().is_empty());
+    assert_eq!(client.get_parameter_proposal(&1u64).status, ParameterProposalStatus::Expired);
+    assert_eq!(client.get_parameter_proposal(&2u64).status, ParameterProposalStatus::Expired);
+}
+
+/// Non-expired proposals are never pruned, regardless of the cap value.
+#[test]
+fn test_prune_bounded_skips_non_expired_proposals() {
+    let (env, client, admin, _service) = setup();
+    let value = encode_u64(&env, MIN_COOLDOWN_SECS);
+
+    // Seed two proposals — do NOT advance time, so they are not yet expired.
+    env.as_contract(&client.address, || {
+        storage::test_seed_pending_parameter_proposals(
+            &env,
+            2,
+            &admin,
+            &param_key_cooldown(),
+            &value,
+        );
+    });
+
+    // Call with a generous cap; nothing should be pruned.
+    env.as_contract(&client.address, || {
+        let pruned = storage::prune_expired_parameter_proposals_bounded(
+            &env,
+            MAX_PENDING_PARAMETER_PROPOSALS,
+        );
+        assert_eq!(pruned, 0);
+    });
+
+    assert_eq!(client.get_pending_param_prop_ids().len(), 2);
+    assert_eq!(client.get_parameter_proposal(&1u64).status, ParameterProposalStatus::Pending);
+    assert_eq!(client.get_parameter_proposal(&2u64).status, ParameterProposalStatus::Pending);
+}

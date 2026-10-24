@@ -960,20 +960,39 @@ pub fn is_parameter_proposal_expired(proposal: &crate::types::ParameterProposal,
     now > expiry
 }
 
-/// Marks expired pending proposals and removes them from the pending index.
-pub fn prune_expired_parameter_proposals(env: &Env) {
+/// Marks up to `max_prune` expired pending proposals and removes them from the pending index.
+///
+/// Bounding the work per call prevents resource-budget exhaustion in a single Soroban
+/// transaction when many proposals have accumulated without a prune (issue #265).
+/// Returns the number of proposals actually pruned.
+pub fn prune_expired_parameter_proposals_bounded(env: &Env, max_prune: u32) -> u32 {
     let ids = get_pending_parameter_proposal_ids(env);
     let now = env.ledger().timestamp();
+    let mut pruned: u32 = 0;
     for i in 0..ids.len() {
+        if pruned >= max_prune {
+            break;
+        }
         let id = ids.get(i).unwrap();
         if let Some(record) = get_parameter_proposal_record(env, id) {
             if record.status == ParameterProposalStatus::Pending
                 && is_parameter_proposal_expired(&record.proposal, now)
             {
                 mark_parameter_proposal_status(env, id, ParameterProposalStatus::Expired);
+                pruned += 1;
             }
         }
     }
+    pruned
+}
+
+/// Marks expired pending proposals and removes them from the pending index.
+///
+/// Delegates to [`prune_expired_parameter_proposals_bounded`] with a cap of
+/// [`crate::constants::MAX_PENDING_PARAMETER_PROPOSALS`] to keep per-call work
+/// bounded even if the pending list has grown unexpectedly large.
+pub fn prune_expired_parameter_proposals(env: &Env) {
+    prune_expired_parameter_proposals_bounded(env, crate::constants::MAX_PENDING_PARAMETER_PROPOSALS);
 }
 
 /// Deletes all expired proposals from storage that have been expired for at least 48 hours.
